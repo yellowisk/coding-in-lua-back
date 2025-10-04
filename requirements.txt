@@ -1,0 +1,37 @@
+# Core deep learning frameworks
+torch
+tensorflow
+
+# Web framework
+fastapi
+uvicorn
+
+# Async and progress utilities
+asyncio
+tqdm
+
+# Data analysis and machine learning
+pandas
+scikit-learn
+numpy
+seaborn
+matplotlib
+dtreeviz
+
+# Data validation and settings management
+pydantic
+
+# Environment and configuration
+python-dotenv
+
+# HTTP requests
+requests
+
+# Caching
+cachetools
+
+# PDF and visualization
+PyMuPDF  # provides the `fitz` module
+
+# Timezone utilities
+pytz
