@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import example
 try:
     from app.routes import classifier
 except Exception:
@@ -17,9 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(example.router, prefix="/examples", tags=["example"])
-app.include_router(classifier.router, prefix="/classifier", tags=["classifier"])
-
+if classifier is not None and hasattr(classifier, 'router'):
+    app.include_router(classifier.router, prefix="/classifier", tags=["classifier"])
+else:
+    print("Warning: Classifier router could not be included.")
 
 @app.get("/")
 def read_root():
