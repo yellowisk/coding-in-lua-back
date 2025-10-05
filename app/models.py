@@ -17,7 +17,6 @@ class DeltaGroup(BaseModel):
     deltaTemp: float
     deltaClouds: float
     deltaOceanDepth: float
-    deltaPhytoplankton: float
 
 class ClassifierDataResponse(BaseModel):
     data: List[SpotData]

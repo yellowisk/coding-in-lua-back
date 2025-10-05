@@ -210,8 +210,6 @@ def classify(req: ClassifierDataRequest):
 	# meteomatics_get_data expects coordinates as [(lat, lon), ...] and start/end datetimes
 	mm_coords: List[tuple] = []
 	normalized_coords: List[List[float]] = []
-	# phyto values will be looked up from workspace CSVs using core.data.phyto
-	provided_phyto_map: Dict[tuple, float] = {}
 
 	def _get_coord_value(d: dict, keys: List[str]):
 		for k in keys:
@@ -233,7 +231,6 @@ def classify(req: ClassifierDataRequest):
 				raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Longitude and latitude must be numeric')
 			normalized_coords.append([lon_f, lat_f])
 			mm_coords.append((lat_f, lon_f))
-			# per-request phyto is ignored; phyto will be pulled from CSVs in workspace
 		else:
 			# expect list-like [lon, lat]
 			try:
@@ -269,37 +266,6 @@ def classify(req: ClassifierDataRequest):
 		logger.exception('Failed to fetch meteomatics data with cache')
 		mm_results = []
 
-	# Fetch phyto/chlorophyll values for the requested coords from CSVs in the workspace
-	try:
-		# Prefer repository-root phyto folders if they exist. This ensures the
-		# classifier pulls chlorophyll values from the project's `phyto` data
-		# rather than a bundled core/data folder.
-		repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-		candidates = [
-			os.path.join(repo_root, 'phyto', 'Processed'),
-			os.path.join(repo_root, 'phyto'),
-		]
-		for cand in candidates:
-			try:
-				if os.path.isdir(cand):
-					# only set if not already set so env overrides still work
-					os.environ.setdefault('PHYTO_FOLDER', cand)
-					break
-			except Exception:
-				continue
-
-		from core.data.phyto import get_phyto_for_coords
-	except Exception:
-		get_phyto_for_coords = None
-
-	phyto_lookup: Dict[tuple, float] = {}
-	if get_phyto_for_coords is not None:
-		try:
-			phyto_lookup = get_phyto_for_coords(start_date, [(c[0], c[1]) for c in normalized_coords])
-		except Exception:
-			logger.exception('Failed to lookup phyto data from CSVs')
-			phyto_lookup = {}
-
 	# Map meteomatics results back to provided coordinates. meteomatics returns multiple entries (one per coord per date)
 	# We'll choose the first matching entry per coordinate
 	coord_to_entry = {}
@@ -324,25 +290,12 @@ def classify(req: ClassifierDataRequest):
 			base_ocean_depth = entry.get('ocean_depth', None)
 			if base_ocean_depth is None:
 				base_ocean_depth = entry.get('depth', 0.0)
-			# base phyto coming from fetched meteomatics entry (if present)
-			try:
-				base_phyto = float(entry.get('phytoplankton', entry.get('phyto', 0.0)))
-			except Exception:
-				base_phyto = 0.0
-			# prefer phyto from CSV lookup (phyto_lookup keyed by rounded lon/lat)
-			lookup_val = phyto_lookup.get((round(longitude, 5), round(latitude, 5)))
-			if lookup_val is not None:
-				try:
-					base_phyto = float(lookup_val)
-				except Exception:
-					pass
 
 			# Apply deltas from request without modifying cache
 			d = req.deltas
 			delta_temp = float(getattr(d, 'deltaTemp', 0.0)) if d else 0.0
 			delta_clouds = float(getattr(d, 'deltaClouds', 0.0)) if d else 0.0
 			delta_ocean = getattr(d, 'deltaOceanDepth', 0.0) if d else 0.0
-			delta_phyto = getattr(d, 'deltaPhytoplankton', 0.0) if d else 0.0
 
 			temperature = base_temp + delta_temp
 			clouds = base_clouds + delta_clouds
@@ -354,16 +307,10 @@ def classify(req: ClassifierDataRequest):
 			except Exception:
 				ocean_depth_val = 0.0
 
-			# Apply multiplicative delta for ocean depth and phytoplankton (assumption)
 			try:
 				ocean_depth_val = ocean_depth_val * (1.0 + float(delta_ocean))
 			except Exception:
 				pass
-
-			try:
-				phyto_val = float(base_phyto) * (1.0 + float(delta_phyto))
-			except Exception:
-				phyto_val = float(base_phyto)
 
 			row = {
 				'longitude': longitude,
@@ -375,7 +322,6 @@ def classify(req: ClassifierDataRequest):
 				'mean_period_total_swell': entry.get('mean_period_total_swell', 0.0),
 				'clouds': clouds,
 				'ocean_depth': ocean_depth_val,
-				'phytoplankton': phyto_val,
 				'year': start_date.year,
 				'month': start_date.month,
 			}
@@ -385,7 +331,6 @@ def classify(req: ClassifierDataRequest):
 			delta_temp = float(getattr(d, 'deltaTemp', 0.0)) if d else 0.0
 			delta_clouds = float(getattr(d, 'deltaClouds', 0.0)) if d else 0.0
 			delta_ocean = getattr(d, 'deltaOceanDepth', 0.0) if d else 0.0
-			delta_phyto = getattr(d, 'deltaPhytoplankton', 0.0) if d else 0.0
 
 			base_ocean = req.depth if req.depth is not None else 0.0
 			try:
@@ -393,18 +338,6 @@ def classify(req: ClassifierDataRequest):
 			except Exception:
 				ocean_depth_val = float(base_ocean)
 
-			# fallback base phyto (use CSV lookup if available)
-			try:
-				base_phyto = 0.0
-				lookup_val = phyto_lookup.get((round(longitude, 5), round(latitude, 5)))
-				if lookup_val is not None:
-					base_phyto = float(lookup_val)
-			except Exception:
-				base_phyto = 0.0
-			try:
-				phyto_val = float(base_phyto) * (1.0 + float(delta_phyto))
-			except Exception:
-				phyto_val = float(base_phyto)
 
 			row = {
 				'longitude': longitude,
@@ -416,15 +349,11 @@ def classify(req: ClassifierDataRequest):
 				'mean_period_total_swell': 0.0,
 				'clouds': 0.0 + delta_clouds,
 				'ocean_depth': ocean_depth_val,
-				'phytoplankton': phyto_val,
 				'year': start_date.year,
 				'month': start_date.month,
 			}
 		rows.append(row)
 
-	# Adapt input rows to the model's expected feature names.
-	# Models in the repo expect features like: ['lat','lon','temperature',...,'ocean_depth','phyto']
-	# Map the incoming format (longitude, latitude, depth, year, month, ...) to those names.
 	model = None
 	try:
 		model = load_model()
@@ -452,7 +381,7 @@ def classify(req: ClassifierDataRequest):
 	if feature_names is None:
 		feature_names = [
 			'lat', 'lon', 'temperature', 'max_individual_wave_height', 'mean_wave_direction',
-			'mean_period_total_swell', 'clouds', 'ocean_depth', 'phyto'
+			'mean_period_total_swell', 'clouds', 'ocean_depth'
 		]
 
 	def _make_model_row(r: Dict[str, Any]) -> Dict[str, float]:
@@ -461,8 +390,6 @@ def classify(req: ClassifierDataRequest):
 		lon = r.get('longitude') if r.get('longitude') is not None else r.get('lon')
 		# depth in incoming requests corresponds to ocean_depth expected by the model
 		ocean_depth = r.get('depth') if r.get('depth') is not None else r.get('ocean_depth', 0.0)
-		# phytoplankton field may be named 'phytoplankton' in meteomatics results
-		phyto = r.get('phytoplankton') if r.get('phytoplankton') is not None else r.get('phyto', 0.0)
 
 		return {
 			'lat': float(lat) if lat is not None else 0.0,
@@ -473,7 +400,6 @@ def classify(req: ClassifierDataRequest):
 			'mean_period_total_swell': float(r.get('mean_period_total_swell', 0.0)),
 			'clouds': float(r.get('clouds', 0.0)),
 			'ocean_depth': float(ocean_depth) if ocean_depth is not None else 0.0,
-			'phyto': float(phyto) if phyto is not None else 0.0,
 		}
 
 	model_rows = [_make_model_row(r) for r in rows]
