@@ -9,10 +9,8 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# Path to the trained model (relative to project root)
 MODEL_PATH = os.path.join('core', 'training', 'models', 'xgboost_classifier.pkl')
 
-# Global model holder (can be sklearn-like estimator or xgboost.Booster)
 _MODEL: Any = None
 _IS_BOOSTER = False
 
