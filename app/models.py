@@ -13,11 +13,20 @@ class SpotData(BaseModel):
     latitude: float
     count: int
 
+class DeltaGroup(BaseModel):
+    deltaTemp: float
+    deltaClouds: float
+    deltaOceanDepth: float
+    deltaPhytoplankton: float
+
 class ClassifierDataResponse(BaseModel):
     data: List[SpotData]
     
 class ClassifierDataRequest(BaseModel):
     coords: List[List[float]]
-    view: str
     date: datetime
-    depth: int
+    # Optional deltas allow clients to omit them for simulated or simple requests
+    deltas: Optional[DeltaGroup] = None
+    # Optional view and depth fields for compatibility with earlier clients
+    view: Optional[str] = None
+    depth: Optional[int] = None

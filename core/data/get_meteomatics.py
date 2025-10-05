@@ -5,7 +5,7 @@ from pandas import DataFrame
 username = 'teixeira_giulliano'
 password = '02h1ECkoX798Vql374Rp'
 
-def get_data(coordinates: list, start_date: dt.datetime, end_date: dt.datetime):
+def get_data(coordinates: list, start_date: dt.datetime, end_date: dt.datetime, deltaGroups: dict = None) -> list:
     model = 'mix'
     startdate = start_date
     enddate = end_date
@@ -21,12 +21,12 @@ def get_data(coordinates: list, start_date: dt.datetime, end_date: dt.datetime):
                 'lat': float(r.Index[0]),
                 'lon': float(r.Index[1]),
                 'date': r.Index[2],
-                'temperature': float(r[1]),
+                'temperature': float(r[1]) * deltaGroups['deltaTemp'],
                 'max_individual_wave_height': float(r[2]),
                 'mean_wave_direction': float(r[3]),
                 'mean_period_total_swell': float(r[4]),
-                'clouds': float(r[5]),
-                'ocean_depth': float(r[6])
+                'clouds': float(r[5]) * deltaGroups['deltaClouds'],
+                'ocean_depth': float(r[6]) * deltaGroups['deltaOceanDepth'],
             })
 
     return results

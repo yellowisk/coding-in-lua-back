@@ -17,6 +17,72 @@ MODEL_PATH = os.path.join('core', 'training', 'models', 'xgboost_classifier.pkl'
 _MODEL: Any = None
 _IS_BOOSTER = False
 
+# Simple in-memory cache for meteomatics results keyed by (lat, lon, date_iso)
+from threading import Lock
+
+_METEO_CACHE: Dict[str, Dict] = {}
+_METEO_CACHE_LOCK = Lock()
+
+
+def _make_meteo_cache_key(lat: float, lon: float, date: dt.datetime) -> str:
+	# round coords to avoid tiny float mismatches
+	return f"{round(lat,5)}:{round(lon,5)}:{date.date().isoformat()}"
+
+
+def fetch_meteo_with_cache(mm_coords: List[tuple], start_date: dt.datetime, end_date: dt.datetime):
+	"""Return a list of meteomatics entries corresponding to mm_coords (lat, lon) order.
+
+	Only fetch missing entries from the external API and populate the cache. Returns list with
+	None for coords that have no data.
+	"""
+	# normalize date to date-only for cache key
+	date = start_date.date()
+	keys = [ (round(lat,5), round(lon,5), date.isoformat()) for (lat, lon) in mm_coords ]
+
+	to_fetch = []
+	fetch_coords = []
+	results_map = {}
+
+	with _METEO_CACHE_LOCK:
+		for (lat, lon, d) in keys:
+			key = f"{lat}:{lon}:{d}"
+			if key in _METEO_CACHE:
+				results_map[key] = _METEO_CACHE[key]
+			else:
+				to_fetch.append((lat, lon))
+				fetch_coords.append((lat, lon))
+
+	# If there are missing coords, call external API once for them
+	if to_fetch:
+		try:
+			from core.data.get_meteomatics import get_data as meteomatics_get_data
+		except Exception:
+			meteomatics_get_data = None
+
+		fetched = []
+		if meteomatics_get_data is not None:
+			# meteomatics_get_data expects coords as (lat, lon)
+			try:
+				fetched = meteomatics_get_data(fetch_coords, start_date, end_date)
+			except Exception:
+				logger.exception('Failed to fetch missing meteomatics data')
+				fetched = []
+
+		# Store fetched entries in cache using rounded keys
+		with _METEO_CACHE_LOCK:
+			for entry in fetched:
+				k = f"{round(entry['lat'],5)}:{round(entry['lon'],5)}:{pd.to_datetime(entry['date']).date().isoformat()}"
+				_METEO_CACHE[k] = entry
+				results_map[k] = entry
+
+	# Build result list in original order
+	results = []
+	for (lat, lon, d) in keys:
+		key = f"{lat}:{lon}:{d}"
+		results.append(results_map.get(key))
+
+	return results
+
 
 def load_model(model_path: str = MODEL_PATH):
 	"""Try to load model as a joblib/sklearn estimator first. Fall back to XGBoost Booster."""
@@ -190,21 +256,20 @@ def classify(req: ClassifierDataRequest):
 	except Exception:
 		meteomatics_get_data = None
 
-	if meteomatics_get_data is not None:
-		try:
-			mm_results = meteomatics_get_data(mm_coords, start_date, end_date)
-   			print('mm_results', mm_results)
-		except Exception:
-			logger.exception('Failed to call meteomatics API')
-			mm_results = []
-	else:
-		logger.info('meteomatics_get_data not available; skipping external data fetch')
+	# Use the cache-aware fetch helper which will call external API only for missing coords
+	try:
+		mm_results = fetch_meteo_with_cache(mm_coords, start_date, end_date)
+	except Exception:
+		logger.exception('Failed to fetch meteomatics data with cache')
 		mm_results = []
 
 	# Map meteomatics results back to provided coordinates. meteomatics returns multiple entries (one per coord per date)
 	# We'll choose the first matching entry per coordinate
 	coord_to_entry = {}
 	for entry in mm_results:
+		# fetch_meteo_with_cache may return None for coords with no data; skip those
+		if not entry:
+			continue
 		key = (round(entry['lon'], 5), round(entry['lat'], 5))
 		if key not in coord_to_entry:
 			coord_to_entry[key] = entry
