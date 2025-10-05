@@ -6,7 +6,6 @@ import logging
 import pandas as pd
 
 from app.models import ClassifierDataRequest, ClassifierDataResponse, SpotData
-from core.data.get_meteomatics import get_data as meteomatics_get_data
 import datetime as dt
 
 router = APIRouter()
@@ -185,11 +184,21 @@ def classify(req: ClassifierDataRequest):
 			start_date = dt.datetime.now()
 			end_date = start_date
 
+	# Import meteomatics helper lazily so missing optional deps don't break module import
 	try:
-		mm_results = meteomatics_get_data(mm_coords, start_date, end_date)
-	except Exception as e:
-		logger.exception('Failed to call meteomatics API')
-		# fallback: build minimal rows from coordinates without meteomatics
+		from core.data.get_meteomatics import get_data as meteomatics_get_data
+	except Exception:
+		meteomatics_get_data = None
+
+	if meteomatics_get_data is not None:
+		try:
+			mm_results = meteomatics_get_data(mm_coords, start_date, end_date)
+   			print('mm_results', mm_results)
+		except Exception:
+			logger.exception('Failed to call meteomatics API')
+			mm_results = []
+	else:
+		logger.info('meteomatics_get_data not available; skipping external data fetch')
 		mm_results = []
 
 	# Map meteomatics results back to provided coordinates. meteomatics returns multiple entries (one per coord per date)
