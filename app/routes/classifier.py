@@ -142,7 +142,6 @@ def _predict_from_model(X: pd.DataFrame) -> Dict[str, List[Union[int, float]]]:
 		raise RuntimeError('Model is not available. Ensure a trained model exists at the configured path.')
 
 	if not _IS_BOOSTER:
-		# sklearn-like API
 		if hasattr(model, 'predict_proba'):
 			probs = model.predict_proba(X)[:, 1].tolist()
 		else:
@@ -162,29 +161,6 @@ def _predict_from_model(X: pd.DataFrame) -> Dict[str, List[Union[int, float]]]:
 		preds = [int(p >= 0.5) for p in probs]
 
 	return {'preds': preds, 'probs': probs}
-
-
-
-@router.get('/year/{year}/month/{month}/depth/{depth}')
-def get_classifier_data(year: int, month: int, depth: int):
-	"""Simple GET endpoint that builds a minimal feature dict from the path params and returns prediction.
-
-	Note: the model expects a specific set/order of features. This endpoint creates a minimal feature set
-	(e.g. year, month, depth) which will only work if the model was trained with these exact column names.
-	For more flexible usage, use the POST /predict endpoint below and provide a features JSON object.
-	"""
-	# Build a single-row DataFrame from provided path params
-	features = {'year': year, 'month': month, 'depth': depth}
-	X = pd.DataFrame([features])
-
-	try:
-		out = _predict_from_model(X)
-	except Exception as e:
-		logger.exception('Prediction failed')
-		raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-	return {'input': features, 'prediction': out['preds'][0], 'probability': out['probs'][0]}
-
 
 @router.post('/predict')
 def predict(features: Union[Dict[str, Any], List[Dict[str, Any]]]):
@@ -280,35 +256,157 @@ def classify(req: ClassifierDataRequest):
 		key = (round(longitude, 5), round(latitude, 5))
 		entry = coord_to_entry.get(key)
 		if entry:
+			# Start from the cached/fetched meteomatics values
+			base_temp = float(entry.get('temperature', 0.0))
+			base_clouds = float(entry.get('clouds', 0.0))
+			base_ocean_depth = entry.get('ocean_depth', None)
+			if base_ocean_depth is None:
+				base_ocean_depth = entry.get('depth', 0.0)
+			base_phyto = float(entry.get('phytoplankton', entry.get('phyto', 0.0)))
+
+			# Apply deltas from request without modifying cache
+			d = req.deltas
+			delta_temp = float(getattr(d, 'deltaTemp', 0.0)) if d else 0.0
+			delta_clouds = float(getattr(d, 'deltaClouds', 0.0)) if d else 0.0
+			delta_ocean = getattr(d, 'deltaOceanDepth', 0.0) if d else 0.0
+			delta_phyto = getattr(d, 'deltaPhytoplankton', 0.0) if d else 0.0
+
+			temperature = base_temp + delta_temp
+			clouds = base_clouds + delta_clouds
+
+			# Determine ocean depth: prefer provided req.depth, otherwise use fetched
+			ocean_depth_val = req.depth if req.depth is not None else base_ocean_depth
+			try:
+				ocean_depth_val = float(ocean_depth_val)
+			except Exception:
+				ocean_depth_val = 0.0
+
+			# Apply multiplicative delta for ocean depth and phytoplankton (assumption)
+			try:
+				ocean_depth_val = ocean_depth_val * (1.0 + float(delta_ocean))
+			except Exception:
+				pass
+
+			try:
+				phyto_val = float(base_phyto) * (1.0 + float(delta_phyto))
+			except Exception:
+				phyto_val = float(base_phyto)
+
 			row = {
 				'longitude': longitude,
 				'latitude': latitude,
 				'depth': req.depth,
-				'temperature': entry.get('temperature', 0.0),
+				'temperature': temperature,
 				'max_individual_wave_height': entry.get('max_individual_wave_height', 0.0),
 				'mean_wave_direction': entry.get('mean_wave_direction', 0.0),
 				'mean_period_total_swell': entry.get('mean_period_total_swell', 0.0),
-				'clouds': entry.get('clouds', 0.0),
+				'clouds': clouds,
+				'ocean_depth': ocean_depth_val,
+				'phytoplankton': phyto_val,
 				'year': start_date.year,
 				'month': start_date.month,
 			}
 		else:
-			# fallback minimal row
+			# fallback minimal row (apply deltas if supplied)
+			d = req.deltas
+			delta_temp = float(getattr(d, 'deltaTemp', 0.0)) if d else 0.0
+			delta_clouds = float(getattr(d, 'deltaClouds', 0.0)) if d else 0.0
+			delta_ocean = getattr(d, 'deltaOceanDepth', 0.0) if d else 0.0
+			delta_phyto = getattr(d, 'deltaPhytoplankton', 0.0) if d else 0.0
+
+			base_ocean = req.depth if req.depth is not None else 0.0
+			try:
+				ocean_depth_val = float(base_ocean) * (1.0 + float(delta_ocean))
+			except Exception:
+				ocean_depth_val = float(base_ocean)
+
+			try:
+				phyto_val = 0.0 * (1.0 + float(delta_phyto))
+			except Exception:
+				phyto_val = 0.0
+
 			row = {
 				'longitude': longitude,
 				'latitude': latitude,
 				'depth': req.depth,
-				'temperature': 0.0,
+				'temperature': 0.0 + delta_temp,
 				'max_individual_wave_height': 0.0,
 				'mean_wave_direction': 0.0,
 				'mean_period_total_swell': 0.0,
-				'clouds': 0.0,
+				'clouds': 0.0 + delta_clouds,
+				'ocean_depth': ocean_depth_val,
+				'phytoplankton': phyto_val,
 				'year': start_date.year,
 				'month': start_date.month,
 			}
 		rows.append(row)
 
-	X = pd.DataFrame(rows)
+	# Adapt input rows to the model's expected feature names.
+	# Models in the repo expect features like: ['lat','lon','temperature',...,'ocean_depth','phyto']
+	# Map the incoming format (longitude, latitude, depth, year, month, ...) to those names.
+	model = None
+	try:
+		model = load_model()
+	except Exception:
+		model = None
+
+	# Attempt to read feature names from the model if available
+	feature_names = None
+	if model is not None:
+		# sklearn estimators expose feature_names_in_; xgboost Booster may have feature_names
+		fn = None
+		if hasattr(model, 'feature_names_in_'):
+			fn = getattr(model, 'feature_names_in_')
+		elif hasattr(model, 'feature_names'):
+			fn = getattr(model, 'feature_names')
+
+		if fn is not None:
+			try:
+				# convert array-like or iterable to plain list
+				feature_names = list(fn)
+			except Exception:
+				feature_names = None
+
+	# Default expected features if model does not advertise them
+	if feature_names is None:
+		feature_names = [
+			'lat', 'lon', 'temperature', 'max_individual_wave_height', 'mean_wave_direction',
+			'mean_period_total_swell', 'clouds', 'ocean_depth', 'phyto'
+		]
+
+	def _make_model_row(r: Dict[str, Any]) -> Dict[str, float]:
+		# map coordinates
+		lat = r.get('latitude') if r.get('latitude') is not None else r.get('lat')
+		lon = r.get('longitude') if r.get('longitude') is not None else r.get('lon')
+		# depth in incoming requests corresponds to ocean_depth expected by the model
+		ocean_depth = r.get('depth') if r.get('depth') is not None else r.get('ocean_depth', 0.0)
+		# phytoplankton field may be named 'phytoplankton' in meteomatics results
+		phyto = r.get('phytoplankton') if r.get('phytoplankton') is not None else r.get('phyto', 0.0)
+
+		return {
+			'lat': float(lat) if lat is not None else 0.0,
+			'lon': float(lon) if lon is not None else 0.0,
+			'temperature': float(r.get('temperature', 0.0)),
+			'max_individual_wave_height': float(r.get('max_individual_wave_height', 0.0)),
+			'mean_wave_direction': float(r.get('mean_wave_direction', 0.0)),
+			'mean_period_total_swell': float(r.get('mean_period_total_swell', 0.0)),
+			'clouds': float(r.get('clouds', 0.0)),
+			'ocean_depth': float(ocean_depth) if ocean_depth is not None else 0.0,
+			'phyto': float(phyto) if phyto is not None else 0.0,
+		}
+
+	model_rows = [_make_model_row(r) for r in rows]
+	X = pd.DataFrame(model_rows)
+
+	# Ensure all expected feature columns exist and are in the right order
+	for fn in feature_names:
+		if fn not in X.columns:
+			X[fn] = 0.0
+	try:
+		X = X[feature_names]
+	except Exception:
+		# If ordering fails, just keep the DataFrame as-is
+		pass
 
 	try:
 		out = _predict_from_model(X)

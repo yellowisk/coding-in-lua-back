@@ -25,8 +25,6 @@ class ClassifierDataResponse(BaseModel):
 class ClassifierDataRequest(BaseModel):
     coords: List[List[float]]
     date: datetime
-    # Optional deltas allow clients to omit them for simulated or simple requests
     deltas: Optional[DeltaGroup] = None
-    # Optional view and depth fields for compatibility with earlier clients
     view: Optional[str] = None
     depth: Optional[int] = None
