@@ -17,7 +17,7 @@ class ClassifierDataResponse(BaseModel):
     data: List[SpotData]
     
 class ClassifierDataRequest(BaseModel):
-    coordinates: List[List[float]]
+    coords: List[List[float]]
     view: str
     date: datetime
     depth: int

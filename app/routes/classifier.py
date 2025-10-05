@@ -5,6 +5,10 @@ import logging
 
 import pandas as pd
 
+from app.models import ClassifierDataRequest, ClassifierDataResponse, SpotData
+from core.data.get_meteomatics import get_data as meteomatics_get_data
+import datetime as dt
+
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
@@ -145,3 +149,117 @@ def predict(features: Union[Dict[str, Any], List[Dict[str, Any]]]):
 		raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 	return {'predictions': out['preds'], 'probabilities': out['probs']}
+
+
+@router.post('/classify', response_model=ClassifierDataResponse)
+def classify(req: ClassifierDataRequest):
+	"""Classify a list of coordinates using the trained model and return SpotData list.
+
+	The request contains `coordinates` (list of [longitude, latitude]), a `view` string, a `date` and `depth`.
+	For each coordinate we build a minimal feature row with longitude, latitude, depth, and date-derived fields
+	(year, month) to feed the model. The returned `count` in `SpotData` is the predicted probability scaled to 0-100
+	(int) when probability is available, otherwise the binary prediction (0/1).
+	"""
+	# Normalize coordinates; expect [longitude, latitude]
+	coords = req.coords
+	if not coords:
+		raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No coordinates provided')
+
+	# We'll batch call the meteomatics API for all coordinates at once for the requested date
+	# meteomatics_get_data expects coordinates as [(lat, lon), ...] and start/end datetimes
+	try:
+		# prepare coordinates as list of (lat, lon)
+		mm_coords = [(float(c[1]), float(c[0])) for c in coords]
+	except Exception:
+		raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Each coordinate must be [longitude, latitude]')
+
+	# Use the provided date (datetime) as start and end
+	if isinstance(req.date, dt.datetime):
+		start_date = req.date
+		end_date = req.date
+	else:
+		try:
+			start_date = dt.datetime.fromisoformat(req.date)
+			end_date = start_date
+		except Exception:
+			start_date = dt.datetime.now()
+			end_date = start_date
+
+	try:
+		mm_results = meteomatics_get_data(mm_coords, start_date, end_date)
+	except Exception as e:
+		logger.exception('Failed to call meteomatics API')
+		# fallback: build minimal rows from coordinates without meteomatics
+		mm_results = []
+
+	# Map meteomatics results back to provided coordinates. meteomatics returns multiple entries (one per coord per date)
+	# We'll choose the first matching entry per coordinate
+	coord_to_entry = {}
+	for entry in mm_results:
+		key = (round(entry['lon'], 5), round(entry['lat'], 5))
+		if key not in coord_to_entry:
+			coord_to_entry[key] = entry
+
+	rows = []
+	for c in coords:
+		longitude, latitude = float(c[0]), float(c[1])
+		key = (round(longitude, 5), round(latitude, 5))
+		entry = coord_to_entry.get(key)
+		if entry:
+			row = {
+				'longitude': longitude,
+				'latitude': latitude,
+				'depth': req.depth,
+				'temperature': entry.get('temperature', 0.0),
+				'max_individual_wave_height': entry.get('max_individual_wave_height', 0.0),
+				'mean_wave_direction': entry.get('mean_wave_direction', 0.0),
+				'mean_period_total_swell': entry.get('mean_period_total_swell', 0.0),
+				'clouds': entry.get('clouds', 0.0),
+				'year': start_date.year,
+				'month': start_date.month,
+			}
+		else:
+			# fallback minimal row
+			row = {
+				'longitude': longitude,
+				'latitude': latitude,
+				'depth': req.depth,
+				'temperature': 0.0,
+				'max_individual_wave_height': 0.0,
+				'mean_wave_direction': 0.0,
+				'mean_period_total_swell': 0.0,
+				'clouds': 0.0,
+				'year': start_date.year,
+				'month': start_date.month,
+			}
+		rows.append(row)
+
+	X = pd.DataFrame(rows)
+
+	try:
+		out = _predict_from_model(X)
+	except Exception as e:
+		logger.exception('Classification failed')
+		raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+	preds = out.get('preds', [])
+	probs = out.get('probs', [])
+
+	spots: List[SpotData] = []
+	for i, row in enumerate(rows):
+		pred = preds[i] if i < len(preds) else 0
+		prob = None
+		if i < len(probs) and probs[i] is not None:
+			try:
+				prob = float(probs[i])
+			except Exception:
+				prob = None
+
+		if prob is not None:
+			count = int(round(prob * 100))
+		else:
+			count = int(pred)
+
+		spots.append(SpotData(longitude=row['longitude'], latitude=row['latitude'], count=count))
+
+	return ClassifierDataResponse(data=spots)
