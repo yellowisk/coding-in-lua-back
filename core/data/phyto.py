@@ -3,9 +3,20 @@ import bisect
 from typing import List, Tuple, Dict, Optional
 import pandas as pd
 
-# Folder for phyto CSVs (defaults to core/data/phyto_data)
+# Folder candidates for phyto CSVs. Prefer repository-root 'phyto/Processed' and 'phyto'
 BASE_DIR = os.path.dirname(__file__)
-PHYTO_FOLDER = os.environ.get('PHYTO_FOLDER', os.path.join(BASE_DIR, 'phyto_data'))
+# repo root is two levels up from core/data
+REPO_ROOT = os.path.abspath(os.path.join(BASE_DIR, '..', '..'))
+# Candidate folders in preferred order. An explicit env var PHYTO_FOLDER may override.
+_env_folder = os.environ.get('PHYTO_FOLDER')
+CANDIDATE_FOLDERS = [p for p in [
+    _env_folder,
+    os.path.join(REPO_ROOT, 'phyto', 'Processed'),
+    os.path.join(REPO_ROOT, 'phyto'),
+    os.path.join(BASE_DIR, 'phyto_data'),
+] if p]
+# PHYTO_FOLDER will hold the folder actually used (or first candidate that exists)
+PHYTO_FOLDER = CANDIDATE_FOLDERS[0] if CANDIDATE_FOLDERS else os.path.join(BASE_DIR, 'phyto_data')
 
 # Simple in-memory cache for opened files
 _PHYTO_CACHE: Dict[str, Tuple[pd.DataFrame, List[float], Dict[float, List[float]]]] = {}
@@ -14,12 +25,20 @@ _PHYTO_CACHE: Dict[str, Tuple[pd.DataFrame, List[float], Dict[float, List[float]
 def _find_phyto_file_for_date(date) -> Optional[str]:
     # naive: choose a file that contains YYYYMM in its name
     yrmon = f"{date.year:04d}{date.month:02d}"
-    try:
-        for fn in os.listdir(PHYTO_FOLDER):
-            if yrmon in fn and fn.endswith('.csv'):
-                return os.path.join(PHYTO_FOLDER, fn)
-    except Exception:
-        return None
+    # Search candidate folders in order and pick the first file that matches the YYYYMM pattern.
+    for folder in CANDIDATE_FOLDERS:
+        try:
+            if not os.path.isdir(folder):
+                continue
+            for fn in os.listdir(folder):
+                if yrmon in fn and fn.lower().endswith('.csv'):
+                    # record the used folder
+                    global PHYTO_FOLDER
+                    PHYTO_FOLDER = folder
+                    return os.path.join(folder, fn)
+        except Exception:
+            # skip folders we can't read
+            continue
     return None
 
 

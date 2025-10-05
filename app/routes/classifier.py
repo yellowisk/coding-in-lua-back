@@ -271,6 +271,23 @@ def classify(req: ClassifierDataRequest):
 
 	# Fetch phyto/chlorophyll values for the requested coords from CSVs in the workspace
 	try:
+		# Prefer repository-root phyto folders if they exist. This ensures the
+		# classifier pulls chlorophyll values from the project's `phyto` data
+		# rather than a bundled core/data folder.
+		repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+		candidates = [
+			os.path.join(repo_root, 'phyto', 'Processed'),
+			os.path.join(repo_root, 'phyto'),
+		]
+		for cand in candidates:
+			try:
+				if os.path.isdir(cand):
+					# only set if not already set so env overrides still work
+					os.environ.setdefault('PHYTO_FOLDER', cand)
+					break
+			except Exception:
+				continue
+
 		from core.data.phyto import get_phyto_for_coords
 	except Exception:
 		get_phyto_for_coords = None
@@ -499,3 +516,9 @@ def classify(req: ClassifierDataRequest):
 		spots.append(SpotData(longitude=row['longitude'], latitude=row['latitude'], count=count))
 
 	return ClassifierDataResponse(data=spots)
+
+
+@router.post('/classify/', response_model=ClassifierDataResponse)
+def classify_trailing_slash(req: ClassifierDataRequest):
+	"""Alias for clients that POST to /classify/ (trailing slash)."""
+	return classify(req)
