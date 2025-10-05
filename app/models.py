@@ -6,3 +6,8 @@ class DataExample(BaseModel):
     name: str
     values: List[float]
     description: Optional[str] = None
+    
+class ClassifierData(BaseModel):
+    longitude: float
+    latitude: float
+    count: int
