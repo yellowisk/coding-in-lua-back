@@ -1,5 +1,7 @@
 .venv
 
+**/**.pyc
+
 # Data files - don't commit CSV data dumps
 core/data/*.csv
 core/data/**/phyto_data/

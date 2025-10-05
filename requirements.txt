@@ -1,7 +1,3 @@
-# Core deep learning frameworks
-torch
-tensorflow
-
 # Web framework
 fastapi
 uvicorn
