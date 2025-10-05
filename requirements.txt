@@ -17,6 +17,7 @@ numpy
 seaborn
 matplotlib
 dtreeviz
+xgboost
 
 # Data validation and settings management
 pydantic
